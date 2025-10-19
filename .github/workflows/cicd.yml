@@ -2,15 +2,14 @@ name: CI/CD
 
 on:
   push:
-    branches: ["**"]   # chạy cho mọi nhánh
-  pull_request:        # chạy PR để test
+    branches: ["**"]
+  pull_request:
 
 concurrency:
   group: cicd-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ===================== CI: Test product (có Mongo + RabbitMQ + Auth) =====================
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -40,7 +39,6 @@ jobs:
           node-version: '20.x'
           cache: 'npm'
 
-      # Cài & chạy AUTH ở nền để test product có thể login lấy token
       - name: Install & start auth (background)
         working-directory: auth
         run: |
@@ -58,7 +56,6 @@ jobs:
         working-directory: product
         env:
           CI: "true"
-          # chỉnh đúng tên biến theo app của bạn:
           MONGODB_URI: mongodb://localhost:27017/eproject_test
           RABBITMQ_URL: amqp://localhost:5672
           AUTH_BASE_URL: http://localhost:3000
@@ -75,8 +72,58 @@ jobs:
           name: service-logs
           path: auth/auth.out
 
-  # ===================== CD: Build & Push Docker images lên Docker Hub =====================
   build-and-push:
     needs: test
-    # chỉ push khi ở nhánh main hoặc khi tag
-    if: github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --- AUTH ---
+      - name: Build & push auth
+        uses: docker/build-push-action@v6
+        with:
+          context: ./auth
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/eproject-auth:latest,${{ secrets.DOCKERHUB_USERNAME }}/eproject-auth:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- PRODUCT ---
+      - name: Build & push product
+        uses: docker/build-push-action@v6
+        with:
+          context: ./product
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/eproject-product:latest,${{ secrets.DOCKERHUB_USERNAME }}/eproject-product:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- ORDER ---
+      - name: Build & push order
+        uses: docker/build-push-action@v6
+        with:
+          context: ./order
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/eproject-order:latest,${{ secrets.DOCKERHUB_USERNAME }}/eproject-order:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # --- GATEWAY ---
+      - name: Build & push gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: ./api-gateway
+          push: true
+          tags: ${{ secrets.DOCKERHUB_USERNAME }}/eproject-gateway:latest,${{ secrets.DOCKERHUB_USERNAME }}/eproject-gateway:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
