@@ -76,9 +76,11 @@ jobs:
           AUTH_BASE_URL: http://localhost:3000
           TEST_USER: ${{ secrets.TEST_USER }}
           TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+          JWT_SECRET: "testsecret"     # <— thêm dòng này cho product
         run: |
           npm test --silent -- \
             --runInBand --detectOpenHandles --forceExit
+
 
       - name: Upload service logs (always)
         if: always()
