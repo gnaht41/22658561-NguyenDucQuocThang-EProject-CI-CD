@@ -32,6 +32,7 @@ class App {
   }
 
   setRoutes() {
+    this.app.get("/auth", (req, res) => res.status(200).json({ status: "ok" }));
     this.app.post("/login", (req, res) => this.authController.login(req, res));
     this.app.post("/register", (req, res) => this.authController.register(req, res));
     this.app.get("/dashboard", authMiddleware, (req, res) => res.json({ message: "Welcome to dashboard" }));
