@@ -1,92 +1,82 @@
-name: CI/CD
+name: CI/CD Pipeline
 
-on:
-  push:
-    branches: ["**"]
-  pull_request:
-
-concurrency:
-  group: cicd-${{ github.ref }}
-  cancel-in-progress: true
+on: [push, pull_request]
 
 jobs:
-  test:
+  Test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     services:
-      mongo:
+      mongodb:
         image: mongo:6
-        ports: ['27017:27017']
+        ports:
+          - 27017:27017
         options: >-
-          --health-cmd="mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
-          --health-interval=5s --health-timeout=3s --health-retries=20
-
-      rabbitmq:
-        image: rabbitmq:3-management
-        ports: ['5672:5672','15672:15672']
-        options: >-
-          --health-cmd="rabbitmq-diagnostics ping"
-          --health-interval=5s --health-timeout=3s --health-retries=30
+          --health-cmd "mongosh --eval 'db.adminCommand({ ping: 1 })'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v3.2.0
 
-      - name: Use Node 20.x
-        uses: actions/setup-node@v4
+      - name: Cache node modules
+        uses: actions/cache@v3
         with:
-          node-version: '20.x'
-          cache: 'npm'
+          path: |
+            auth/node_modules
+            product/node_modules
+            node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
 
-      # Đợi Mongo & RabbitMQ sẵn sàng trước khi start auth
-      - name: Wait for Mongo & RabbitMQ
+      - name: Setup test environment
         run: |
-          npx --yes wait-on tcp:localhost:27017 --timeout 120000
-          npx --yes wait-on http://localhost:15672 --timeout 120000
+          # Auth service
+          echo "MONGODB_AUTH_URI=${{ secrets.MONGODB_AUTH_URI }}" >> auth/.env
+          echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> auth/.env
 
-      # Start AUTH (đúng tên biến của bạn: MONGODB_AUTH_URI)
-      - name: Install & start auth (background)
-        working-directory: auth
-        env:
-          PORT: "3000"
-          MONGODB_AUTH_URI: "mongodb://localhost:27017/eproject_auth"
-          JWT_SECRET: "testsecret"
+          # Product service
+          echo "MONGODB_PRODUCT_URI=${{ secrets.MONGODB_PRODUCT_URI }}" >> product/.env
+          echo "JWT_SECRET=${{ secrets.JWT_SECRET }}" >> product/.env
+          echo "LOGIN_TEST_USER=${{ secrets.LOGIN_TEST_USER }}" >> product/.env
+          echo "LOGIN_TEST_PASSWORD=${{ secrets.LOGIN_TEST_PASSWORD }}" >> product/.env
+
+      - name: Install dependencies
         run: |
-          npm ci --prefer-offline --no-audit --no-fund
-          nohup npm start > $GITHUB_WORKSPACE/auth.out 2>&1 &
+          cd auth && npm ci
+          cd ../product && npm ci
+          cd .. && npm ci
 
-      # ✅ Đợi theo TCP (không yêu cầu HTTP 200 ở '/')
-      - name: Wait for auth:3000 ready (TCP, with logs on failure)
+      - name: Wait for MongoDB
         run: |
-          npx --yes wait-on tcp:localhost:3000 --timeout 120000 \
-          || { echo "---- AUTH LOGS ----"; tail -n 200 "$GITHUB_WORKSPACE/auth.out" || true; exit 1; }
+          echo "Waiting for MongoDB to be ready..."
+          for i in {1..10}; do
+            nc -z localhost 27017 && echo "MongoDB is ready!" && break
+            echo "Waiting 3s..."
+            sleep 3
+          done
 
-      # Cài và test product
-      - name: Install product deps
-        working-directory: product
-        run: npm ci --prefer-offline --no-audit --no-fund
-
-      - name: Test product
-        working-directory: product
-        env:
-          CI: "true"
-          MONGODB_URI: mongodb://localhost:27017/eproject_test
-          RABBITMQ_URL: amqp://localhost:5672
-          AUTH_BASE_URL: http://localhost:3000
-          TEST_USER: ${{ secrets.TEST_USER }}
-          TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
-          JWT_SECRET: "testsecret"     # product verify cùng secret với auth
+      - name: Run auth tests
         run: |
-          npm test --silent -- \
-            --runInBand --detectOpenHandles --forceExit
+          cd auth
+          npm test
 
-      - name: Upload service logs (always)
+      - name: Start auth service for integration tests
+        run: |
+          cd auth
+          npm start &
+          echo "Waiting for auth service..."
+          npx wait-on http://localhost:3000/auth --timeout 30000
+
+      - name: Run product tests
+        run: |
+          cd product
+          npm test
+
+      - name: Cleanup
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: service-logs
-          path: ${{ github.workspace }}/auth.out
+        run: pkill -f "node" || true
 
   build-and-push:
     needs: test
